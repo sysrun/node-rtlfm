@@ -9,8 +9,13 @@ rtlsdr.getDevices(function (err, devices) {
   } else {
     //console.log(devices);
     var dev = devices[0];
-    console.log(dev);
-    console.log(dev.test());
+    dev.open(function (er) {
+      if (er) {
+        console.log(er);
+      } else {
+        console.log(dev.test());
+      }
+    });
   }
 
 });

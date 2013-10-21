@@ -771,7 +771,7 @@ static void optimal_settings(struct fm_state *fm, int freq, int hopping)
   if (fm->mode_demod == &fm_demod) {
     fm->output_scale = 1;}
   /* Set the frequency */
-  r = rtlsdr_set_center_freq(dev, (uint32_t)capture_freq);
+  r = rtlsdr_set_center_freq(fm->device, (uint32_t)capture_freq);
   if (hopping) {
     return;}
   fprintf(stderr, "Oversampling input by: %ix.\n", fm->downsample);
@@ -789,7 +789,7 @@ static void optimal_settings(struct fm_state *fm, int freq, int hopping)
     fprintf(stderr, "Output at %u Hz.\n", fm->output_rate);
   } else {
     fprintf(stderr, "Output at %u Hz.\n", fm->sample_rate/fm->post_downsample);}
-  r = rtlsdr_set_sample_rate(dev, (uint32_t)capture_rate);
+  r = rtlsdr_set_sample_rate(fm->device, (uint32_t)capture_rate);
   if (r < 0) {
     fprintf(stderr, "WARNING: Failed to set sample rate.\n");}
 
@@ -839,7 +839,7 @@ void full_demod(struct fm_state *fm)
     fm->squelch_hits = fm->conseq_squelch + 1;  /* hair trigger */
     /* wait for settling and flush buffer */
     usleep(5000);
-    rtlsdr_read_sync(dev, NULL, 4096, NULL);
+    rtlsdr_read_sync(fm->device, NULL, 4096, NULL);
   }
 }
 
@@ -862,7 +862,7 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 static void sync_read(unsigned char *buf, uint32_t len, struct fm_state *fm)
 {
   int r, n_read;
-  r = rtlsdr_read_sync(dev, buf, len, &n_read);
+  r = rtlsdr_read_sync(fm->device, buf, len, &n_read);
   if (r < 0) {
     fprintf(stderr, "WARNING: sync read failed.\n");
     return;
@@ -973,15 +973,20 @@ v8::Handle<v8::Value> device_test(const v8::Arguments& args) {
   int device_count;
   int ppm_error = 0;
   char vendor[256], product[256], serial[256];
+
+  fm.device = data->dev;
   fm_init(&fm);
+
   pthread_cond_init(&data_ready, NULL);
   pthread_rwlock_init(&data_rw, NULL);
   pthread_mutex_init(&data_mutex, NULL);
 
 
-  int argc = 4;
+
+  int argc = 5;
   char *argv[] = {
      "rtl_fm",
+     "-W",
      "-f",
      "101900000",
      "-"
@@ -1058,7 +1063,7 @@ v8::Handle<v8::Value> device_test(const v8::Arguments& args) {
       wb_mode = 1;
       fm.mode_demod = &fm_demod;
       fm.sample_rate = 170000;
-      fm.output_rate = 32000;
+      fm.output_rate = 170000;
       fm.custom_atan = 1;
       fm.post_downsample = 4;
       fm.deemph = 1;
@@ -1162,10 +1167,10 @@ v8::Handle<v8::Value> device_test(const v8::Arguments& args) {
 
   /* Set the tuner gain */
   if (gain == AUTO_GAIN) {
-    r = rtlsdr_set_tuner_gain_mode(dev, 0);
+    r = rtlsdr_set_tuner_gain_mode(fm.device, 0);
   } else {
-    r = rtlsdr_set_tuner_gain_mode(dev, 1);
-    r = rtlsdr_set_tuner_gain(dev, gain);
+    r = rtlsdr_set_tuner_gain_mode(fm.device, 1);
+    r = rtlsdr_set_tuner_gain(fm.device, gain);
   }
   if (r != 0) {
     fprintf(stderr, "WARNING: Failed to set tuner gain.\n");
@@ -1174,7 +1179,7 @@ v8::Handle<v8::Value> device_test(const v8::Arguments& args) {
   } else {
     fprintf(stderr, "Tuner gain set to %0.2f dB.\n", gain/10.0);
   }
-  r = rtlsdr_set_freq_correction(dev, ppm_error);
+  r = rtlsdr_set_freq_correction(fm.device, ppm_error);
 
   if (strcmp(filename, "-") == 0) { /* Write samples to stdout */
     fm.file = stdout;
@@ -1190,7 +1195,7 @@ v8::Handle<v8::Value> device_test(const v8::Arguments& args) {
   }
 
   /* Reset endpoint before we start reading from it (mandatory) */
-  r = rtlsdr_reset_buffer(dev);
+  r = rtlsdr_reset_buffer(fm.device);
   if (r < 0) {
     fprintf(stderr, "WARNING: Failed to reset buffers.\n");}
 
@@ -1219,7 +1224,7 @@ v8::Handle<v8::Value> device_test(const v8::Arguments& args) {
   if (fm.file != stdout) {
     fclose(fm.file);}
 
-  rtlsdr_close(dev);
+  rtlsdr_close(fm.device);
   free (buffer);
   return scope.Close(v8::String::New("test"));
 }
