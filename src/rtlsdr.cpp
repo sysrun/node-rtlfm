@@ -78,6 +78,7 @@ struct fm_state
   int      prev_lpr_index;
   int      dc_block, dc_avg;
   void     (*mode_demod)(struct fm_state*);
+  rtlsdr_dev_t *device;
 };
 
 #define DEFAULT_ASYNC_BUF_NUMBER 32
