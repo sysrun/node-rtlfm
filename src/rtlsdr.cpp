@@ -41,6 +41,11 @@ static int *atan_lut = NULL;
 static int atan_lut_size = 131072; /* 512 KB */
 static int atan_lut_coef = 8;
 
+struct DeviceData {
+  rtlsdr_dev_t *dev;
+  v8::Persistent<v8::Object> v8dev;
+};
+
 struct fm_state
 {
   int      now_r, now_j;
@@ -74,6 +79,7 @@ struct fm_state
   int      dc_block, dc_avg;
   void     (*mode_demod)(struct fm_state*);
   rtlsdr_dev_t *device;
+  DeviceData *deviceData;
 };
 
 #define DEFAULT_ASYNC_BUF_NUMBER 32
@@ -92,10 +98,6 @@ v8::Handle<v8::Value> device_test(const v8::Arguments& args);
 void device_cleanUp(v8::Persistent<v8::Value> obj, void *parameter);
 static void device_dataCallback(unsigned char *buf, uint32_t len, void *ctx);
 int main_call(int argc, char **argv);
-struct DeviceData {
-  rtlsdr_dev_t *dev;
-  v8::Persistent<v8::Object> v8dev;
-};
 
 struct DataEventData {
   DeviceData* devData;
@@ -786,6 +788,26 @@ static void optimal_settings(struct fm_state *fm, int freq, int hopping)
 
 }
 
+static void pcm_dataCallback(int16_t* buf, uint32_t len, void *ctx) {
+  DeviceData* devData = (DeviceData*)ctx;
+
+  v8::HandleScope scope;
+
+  unsigned char* intbuf;
+  intbuf = (unsigned char*)(malloc(len * 2));
+  memcpy(intbuf, buf, len);
+
+
+
+  v8::Handle<v8::Value> emitArgs[2];
+  emitArgs[0] = v8::String::New("pcmdata");
+  emitArgs[1] = v8::Local<v8::Object>::New(node::Buffer::New((char*)intbuf, len * 2)->handle_);
+  v8::Function::Cast(*devData->v8dev->Get(v8::String::New("emit")))->Call(devData->v8dev, 2, emitArgs);
+
+  //uv_work_t* req = new uv_work_t();
+  //uv_queue_work(uv_default_loop(), req, PCM_EmitData, (uv_after_work_cb)PCM_EmitDataAfter);
+}
+
 void full_demod(struct fm_state *fm)
 {
   int i, sr, freq_next, hop = 0;
@@ -821,7 +843,8 @@ void full_demod(struct fm_state *fm)
   if (fm->dc_block) {
     dc_block_filter(fm);}
   /* ignore under runs for now */
-  fwrite(fm->signal2, 2, fm->signal2_len, fm->file);
+    pcm_dataCallback(fm->signal2, fm->signal2_len, &fm->deviceData);
+  //fwrite(fm->signal2, 2, fm->signal2_len, fm->file);
   if (hop) {
     freq_next = (fm->freq_now + 1) % fm->freq_len;
     optimal_settings(fm, freq_next, 1);
@@ -919,6 +942,8 @@ v8::Handle<v8::Value> device_test(const v8::Arguments& args) {
   char vendor[256], product[256], serial[256];
 
   fm.device = data->dev;
+  fm.deviceData = data;
+
   fm_init(&fm);
 
   int argc = 5;
