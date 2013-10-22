@@ -19,7 +19,6 @@
 #define round(x) (x > 0.0 ? floor(x + 0.5): ceil(x - 0.5))
 #endif
 
-#include <pthread.h>
 #include "/usr/include/libusb-1.0/libusb.h"
 
 #include "rtl-sdr.h"
@@ -33,10 +32,6 @@
 
 #define FREQUENCIES_LIMIT   1000
 
-static pthread_t demod_thread;
-static pthread_cond_t data_ready;   /* shared buffer filled */
-static pthread_rwlock_t data_rw;    /* lock for shared buffer */
-static pthread_mutex_t data_mutex;  /* because conds are dumb */
 static volatile int do_exit = 0;
 static rtlsdr_dev_t *dev = NULL;
 static int lcm_post[17] = {1,1,1,3,1,5,3,7,1,9,5,11,3,13,7,15,1};
@@ -57,7 +52,7 @@ struct fm_state
   int      squelch_level, conseq_squelch, squelch_hits, terminate_on_squelch;
   int      exit_flag;
   uint8_t  buf[MAXIMUM_BUF_LENGTH];
-  uint32_t buf_len;
+  int buf_len;
   int      signal[MAXIMUM_BUF_LENGTH];  /* 16 bit signed i/q pairs */
   int16_t  signal2[MAXIMUM_BUF_LENGTH]; /* signal has lowpass, signal2 has demod */
   int      signal_len;
@@ -390,10 +385,6 @@ static void sighandler(int signum)
   //rtlsdr_cancel_async(dev);
 }
 #endif
-
-/* more cond dumbness */
-#define safe_cond_signal(n, m) pthread_mutex_lock(m); pthread_cond_signal(n); pthread_mutex_unlock(m)
-#define safe_cond_wait(n, m) pthread_mutex_lock(m); pthread_cond_wait(n, m); pthread_mutex_unlock(m)
 
 void rotate_90(unsigned char *buf, uint32_t len)
 /* 90 rotation is 1+0j, 0+1j, -1+0j, 0-1j
@@ -798,14 +789,12 @@ static void optimal_settings(struct fm_state *fm, int freq, int hopping)
 void full_demod(struct fm_state *fm)
 {
   int i, sr, freq_next, hop = 0;
-  pthread_rwlock_wrlock(&data_rw);
   rotate_90(fm->buf, fm->buf_len);
   if (fm->fir_enable) {
     low_pass_fir(fm, fm->buf, fm->buf_len);
   } else {
     low_pass(fm, fm->buf, fm->buf_len);
   }
-  pthread_rwlock_unlock(&data_rw);
   fm->mode_demod(fm);
   if (fm->mode_demod == &raw_demod) {
     fwrite(fm->signal2, 2, fm->signal2_len, fm->file);
@@ -843,51 +832,6 @@ void full_demod(struct fm_state *fm)
   }
 }
 
-static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
-{
-  struct fm_state *fm2 = (fm_state*)ctx;
-  if (do_exit) {
-    return;}
-  if (!ctx) {
-    return;}
-  pthread_rwlock_wrlock(&data_rw);
-  memcpy(fm2->buf, buf, len);
-  fm2->buf_len = len;
-  pthread_rwlock_unlock(&data_rw);
-  safe_cond_signal(&data_ready, &data_mutex);
-  /* single threaded uses 25% less CPU? */
-  /* full_demod(fm2); */
-}
-
-static void sync_read(unsigned char *buf, uint32_t len, struct fm_state *fm)
-{
-  int r, n_read;
-  r = rtlsdr_read_sync(fm->device, buf, len, &n_read);
-  if (r < 0) {
-    fprintf(stderr, "WARNING: sync read failed.\n");
-    return;
-  }
-  pthread_rwlock_wrlock(&data_rw);
-  memcpy(fm->buf, buf, len);
-  fm->buf_len = len;
-  pthread_rwlock_unlock(&data_rw);
-  safe_cond_signal(&data_ready, &data_mutex);
-  //full_demod(fm);
-}
-
-static void *demod_thread_fn(void *arg)
-{
-  struct fm_state *fm2 = (fm_state*)arg;
-  while (!do_exit) {
-    safe_cond_wait(&data_ready, &data_mutex);
-    full_demod(fm2);
-    if (fm2->exit_flag) {
-      do_exit = 1;
-      //rtlsdr_cancel_async(dev);
-    }
-  }
-  return 0;
-}
 
 double atofs(char* f)
 /* standard suffixes */
@@ -976,12 +920,6 @@ v8::Handle<v8::Value> device_test(const v8::Arguments& args) {
 
   fm.device = data->dev;
   fm_init(&fm);
-
-  pthread_cond_init(&data_ready, NULL);
-  pthread_rwlock_init(&data_rw, NULL);
-  pthread_mutex_init(&data_mutex, NULL);
-
-
 
   int argc = 5;
   char *argv[] = {
@@ -1200,14 +1138,21 @@ v8::Handle<v8::Value> device_test(const v8::Arguments& args) {
   if (r < 0) {
     fprintf(stderr, "WARNING: Failed to reset buffers.\n");}
 
-  pthread_create(&demod_thread, NULL, demod_thread_fn, (void *)(&fm));
-  /*rtlsdr_read_async(dev, rtlsdr_callback, (void *)(&fm),
-            DEFAULT_ASYNC_BUF_NUMBER,
-            ACTUAL_BUF_LENGTH);*/
 
   while (!do_exit) {
-    sync_read(buffer, ACTUAL_BUF_LENGTH, &fm);
-  }
+        r = rtlsdr_read_sync(fm.device, &fm.buf,
+                             lcm_post[fm.post_downsample] * DEFAULT_BUF_LENGTH,
+                             &fm.buf_len);
+        if (r < 0) {
+            fprintf(stderr, "WARNING: sync read failed.\n");
+            break;
+        }
+        full_demod(&fm);
+        if (fm.exit_flag) {
+            do_exit = 1;
+            break;
+        }
+    }
 
   if (do_exit) {
     fprintf(stderr, "\nUser cancel, exiting...\n");}
@@ -1215,12 +1160,6 @@ v8::Handle<v8::Value> device_test(const v8::Arguments& args) {
     fprintf(stderr, "\nLibrary error %d, exiting...\n", r);}
 
   //rtlsdr_cancel_async(dev);
-  safe_cond_signal(&data_ready, &data_mutex);
-  pthread_join(demod_thread, NULL);
-
-  pthread_cond_destroy(&data_ready);
-  pthread_rwlock_destroy(&data_rw);
-  pthread_mutex_destroy(&data_mutex);
 
   if (fm.file != stdout) {
     fclose(fm.file);}
