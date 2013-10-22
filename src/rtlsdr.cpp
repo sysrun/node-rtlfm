@@ -1130,7 +1130,7 @@ v8::Handle<v8::Value> device_test(const v8::Arguments& args) {
     fprintf(stderr, "  %d:  %s, %s, SN: %s\n", i, vendor, product, serial);
   }
   fprintf(stderr, "\n");
-
+  /*
   fprintf(stderr, "Using device %d: %s\n",
     dev_index, rtlsdr_get_device_name(dev_index));
 
@@ -1139,6 +1139,7 @@ v8::Handle<v8::Value> device_test(const v8::Arguments& args) {
     fprintf(stderr, "Failed to open rtlsdr device #%d.\n", dev_index);
     exit(1);
   }
+  */
 #ifndef _WIN32
   sigact.sa_handler = sighandler;
   sigemptyset(&sigact.sa_mask);
