@@ -15,6 +15,9 @@ rtlsdr.getDevices(function (err, devices) {
       } else {
         console.log(dev.test());
       }
+      dev.on('pcmdata', function (d) {
+        console.log(d.length);
+      });
     });
   }
 

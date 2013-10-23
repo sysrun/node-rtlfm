@@ -110,6 +110,12 @@ struct StartData {
   v8::Persistent<v8::Value> callback;
 };
 
+struct StartDecoderData {
+  DeviceData* devData;
+  v8::Persistent<v8::Value> callback;
+  struct fm_state fm;
+};
+
 v8::Handle<v8::Value> GetDevices(const v8::Arguments& args) {
   v8::HandleScope scope;
   int deviceCount, i;
@@ -788,24 +794,39 @@ static void optimal_settings(struct fm_state *fm, int freq, int hopping)
 
 }
 
-static void pcm_dataCallback(int16_t* buf, uint32_t len, void *ctx) {
-  DeviceData* devData = (DeviceData*)ctx;
+void PCM_EmitData(uv_work_t* req) {
 
+}
+
+void PCM_EmitDataAfter(uv_work_t* req) {
   v8::HandleScope scope;
+  DataEventData* eventData = (DataEventData*)req->data;
 
+  v8::Handle<v8::Value> emitArgs[2];
+  emitArgs[0] = v8::String::New("pcmdata");
+  emitArgs[1] = v8::Local<v8::Object>::New(node::Buffer::New((char*)eventData->buf, eventData->len)->handle_);
+  v8::Function::Cast(*eventData->devData->v8dev->Get(v8::String::New("emit")))->Call(eventData->devData->v8dev, 2, emitArgs);
+
+  delete eventData;
+}
+
+void pcm_dataCallback(int16_t* buf, uint32_t len, fm_state* fm) {
+  //fprintf(stderr, "pcm_dataCallback.\n");
+  DeviceData* devData = (DeviceData*)fm->deviceData;
+  //fwrite(buf, 2, len, fm->file);
   unsigned char* intbuf;
   intbuf = (unsigned char*)(malloc(len * 2));
   memcpy(intbuf, buf, len);
 
+  DataEventData* eventData = new DataEventData();
+  eventData->devData = devData;
+  eventData->buf = intbuf;
+  eventData->len = len * 2;
 
+  uv_work_t* req = new uv_work_t();
+  req->data = eventData;
+  uv_queue_work(uv_default_loop(), req, PCM_EmitData, (uv_after_work_cb)PCM_EmitDataAfter);
 
-  v8::Handle<v8::Value> emitArgs[2];
-  emitArgs[0] = v8::String::New("pcmdata");
-  emitArgs[1] = v8::Local<v8::Object>::New(node::Buffer::New((char*)intbuf, len * 2)->handle_);
-  v8::Function::Cast(*devData->v8dev->Get(v8::String::New("emit")))->Call(devData->v8dev, 2, emitArgs);
-
-  //uv_work_t* req = new uv_work_t();
-  //uv_queue_work(uv_default_loop(), req, PCM_EmitData, (uv_after_work_cb)PCM_EmitDataAfter);
 }
 
 void full_demod(struct fm_state *fm)
@@ -843,7 +864,7 @@ void full_demod(struct fm_state *fm)
   if (fm->dc_block) {
     dc_block_filter(fm);}
   /* ignore under runs for now */
-    pcm_dataCallback(fm->signal2, fm->signal2_len, &fm->deviceData);
+    pcm_dataCallback(fm->signal2, fm->signal2_len, fm);
   //fwrite(fm->signal2, 2, fm->signal2_len, fm->file);
   if (hop) {
     freq_next = (fm->freq_now + 1) % fm->freq_len;
@@ -920,6 +941,45 @@ void fm_init(struct fm_state *fm)
   fm->now_lpr = 0;
   fm->dc_block = 0;
   fm->dc_avg = 0;
+}
+
+void DECODER_Start(uv_work_t* req) {
+  StartDecoderData* startDecoderData = (StartDecoderData*)req->data;
+  struct fm_state fm;
+  fm = startDecoderData->fm;
+  int r;
+  while (!do_exit) {
+        r = rtlsdr_read_sync(fm.device, &fm.buf,
+                             lcm_post[fm.post_downsample] * DEFAULT_BUF_LENGTH,
+                             &fm.buf_len);
+        if (r < 0) {
+            fprintf(stderr, "WARNING: sync read failed.\n");
+            break;
+        }
+        full_demod(&fm);
+        if (fm.exit_flag) {
+            do_exit = 1;
+            break;
+        }
+    }
+/*
+  int err = rtlsdr_read_async(startDeviceData->devData->dev, device_dataCallback, (void*)startDeviceData->devData, DEFAULT_ASYNC_BUF_NUMBER, DEFAULT_BUF_LENGTH);
+  if(err) {
+    char str[1000];
+    sprintf(str, "failed to start read async (err: %d)", err);
+    printf("error starting: %s", str);
+    // TODO callback with error
+    return;
+  }
+  */
+}
+
+void DECODER_StartAfter(uv_work_t* req) {
+  v8::HandleScope scope;
+  StartDecoderData* startDecoderData = (StartDecoderData*)req->data;
+
+  // TODO startData->callback.Dispose();
+  delete startDecoderData;
 }
 
 v8::Handle<v8::Value> device_test(const v8::Arguments& args) {
@@ -1163,7 +1223,15 @@ v8::Handle<v8::Value> device_test(const v8::Arguments& args) {
   if (r < 0) {
     fprintf(stderr, "WARNING: Failed to reset buffers.\n");}
 
+  StartDecoderData* startDecoderData;
+  startDecoderData = new StartDecoderData();
+  startDecoderData->devData = data;
+  startDecoderData->fm = fm;
 
+  uv_work_t* req = new uv_work_t();
+  req->data = startDecoderData;
+  uv_queue_work(uv_default_loop(), req, DECODER_Start, (uv_after_work_cb)DECODER_StartAfter);
+  /*
   while (!do_exit) {
         r = rtlsdr_read_sync(fm.device, &fm.buf,
                              lcm_post[fm.post_downsample] * DEFAULT_BUF_LENGTH,
@@ -1191,6 +1259,7 @@ v8::Handle<v8::Value> device_test(const v8::Arguments& args) {
 
   rtlsdr_close(fm.device);
   free (buffer);
+  */
   return scope.Close(v8::String::New("test"));
 }
 
